@@ -1,29 +1,14 @@
+mod balancer;
+mod proxy;
+
+use balancer::Balancer;
+use proxy::handle_connection;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8080";
 const BACKEND_ADDRS: &[&str] = &["127.0.0.1:9001", "127.0.0.1:9002", "127.0.0.1:9003"];
-
-struct Balancer {
-    backends: Vec<String>,
-    next: AtomicUsize,
-}
-
-impl Balancer {
-    fn new(backends: &[&str]) -> Self {
-        Balancer {
-            backends: backends.iter().map(|s| s.to_string()).collect(),
-            next: AtomicUsize::new(0),
-        }
-    }
-
-    fn pick(&self) -> String {
-        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.backends.len();
-        self.backends[i].clone()
-    }
-}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -31,6 +16,8 @@ async fn main() -> io::Result<()> {
     println!("listening on {LISTEN_ADDR}");
 
     let balancer = Arc::new(Balancer::new(BACKEND_ADDRS));
+
+    tokio::spawn(Arc::clone(&balancer).run_health_checks());
 
     loop {
         let (client, addr) = listener.accept().await?;
@@ -41,11 +28,4 @@ async fn main() -> io::Result<()> {
             }
         });
     }
-}
-
-async fn handle_connection(mut client: TcpStream, balancer: &Balancer) -> io::Result<()> {
-    let backend_addr = balancer.pick();
-    let mut backend = TcpStream::connect(backend_addr).await?;
-    io::copy_bidirectional(&mut client, &mut backend).await?;
-    Ok(())
 }
