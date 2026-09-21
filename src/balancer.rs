@@ -9,11 +9,23 @@ const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 pub struct Backend {
     pub addr: String,
     alive: AtomicBool,
+    active_connections: AtomicUsize,
 }
 
 pub struct Balancer {
     backends: Vec<Backend>,
-    next: AtomicUsize,
+}
+
+pub struct ConnectionGuard<'a> {
+    backend: &'a Backend,
+}
+
+impl<'a> Drop for ConnectionGuard<'a> {
+    fn drop(&mut self) {
+        self.backend
+            .active_connections
+            .fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Balancer {
@@ -24,22 +36,30 @@ impl Balancer {
                 .map(|s| Backend {
                     addr: s.to_string(),
                     alive: AtomicBool::new(true),
+                    active_connections: AtomicUsize::new(0),
                 })
                 .collect(),
-            next: AtomicUsize::new(0),
         }
     }
 
-    pub fn pick(&self) -> Option<String> {
-        let len = self.backends.len();
-        for _ in 0..len {
-            let i = self.next.fetch_add(1, Ordering::Relaxed) % len;
-            let backend = &self.backends[i];
-            if backend.alive.load(Ordering::Relaxed) {
-                return Some(backend.addr.clone());
+    pub fn pick(&self) -> Option<(String, ConnectionGuard<'_>)> {
+        loop {
+            let chosen = self
+                .backends
+                .iter()
+                .filter(|b| b.alive.load(Ordering::Relaxed))
+                .min_by_key(|b| b.active_connections.load(Ordering::Relaxed))?;
+
+            let current = chosen.active_connections.load(Ordering::Relaxed);
+
+            if chosen
+                .active_connections
+                .compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some((chosen.addr.clone(), ConnectionGuard { backend: chosen }));
             }
         }
-        None
     }
 
     pub async fn run_health_checks(self: Arc<Self>) {

@@ -21,8 +21,8 @@ pub async fn handle_request(
     balancer: Arc<Balancer>,
     client: ProxyClient,
 ) -> Result<Response<ResponseBody>, hyper::Error> {
-    let backend_addr = match balancer.pick() {
-        Some(addr) => addr,
+    let (backend_addr, _guard) = match balancer.pick() {
+        Some(picked) => picked,
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -36,7 +36,7 @@ pub async fn handle_request(
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let uri_string = format!("http!//{backend_addr}{path_and_query}");
+    let uri_string = format!("http://{backend_addr}{path_and_query}");
     let uri: hyper::Uri = match uri_string.parse() {
         Ok(u) => u,
         Err(_) => {
